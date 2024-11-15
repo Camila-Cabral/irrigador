@@ -2,14 +2,15 @@
 #include <PubSubClient.h>
 
 // Configurações de Wi-Fi
-const char* ssid = "SSID da rede Wi-Fi";        // Substitua pelo SSID da sua rede Wi-Fi
-const char* password = "Senha da rede Wi-Fi";   // Substitua pela senha da sua rede Wi-Fi
+const char* ssid = "SSID";        // Substitua pelo nome da sua rede Wi-Fi
+const char* password = "SENHA DO WIFI";   // Substitua pela senha da sua rede Wi-Fi
 
-// Configurações do TagoIO (MQTT)
-const char* mqttServer = "mqtt.tago.io";
+// Configurações do Thinger.io (MQTT)
+const char* mqttServer = "backend.thinger.io";
 const int mqttPort = 1883;
-const char* mqttUser = "TagoIO-Token";     // Usuário MQTT (deixe como "TagoIO-Token") conforme a documentação do Tago.io
-const char* mqttToken = "Token do bucket criado no tago.io"; // Substitua pelo token do seu bucket no TagoIO
+const char* mqttUser = "USUARIO DO THINGER.IO";      // Usuário MQTT (seu e-mail no Thinger.io)
+const char* mqttToken = "SENHA";    // Senha do Thinger.io
+const char* deviceID = "ID DO DEVICE";    // ID do dispositivo criado no Thinger.io
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -18,7 +19,8 @@ const int nivelAguaPin = 34;
 const int sensorUmidadePin = 35;
 const int relayPin = 18;
 const int maxSensorAgua = 1800;
-const int maxSensorUmidade = 4095;
+const int valorMaxSeco = 4095;    // Valor máximo quando o solo está seco
+const int valorMinUmido = 2103;   // Valor mínimo quando o solo está totalmente úmido
 
 void setup() {
   Serial.begin(115200);
@@ -31,7 +33,7 @@ void setup() {
   // Configura o cliente MQTT
   client.setServer(mqttServer, mqttPort);
 
-  // Conecta ao TagoIO via MQTT
+  // Conecta ao Thinger.io via MQTT
   connectMQTT();
 }
 
@@ -44,7 +46,7 @@ void loop() {
 
   // Verifique se ainda está conectado ao MQTT, reconecte se necessário
   if (!client.connected()) {
-    connectMQTT();  // Tenta reconectar ao TagoIO
+    connectMQTT();  // Tenta reconectar ao Thinger.io
   }
   client.loop();  // Mantém o loop do cliente MQTT
 
@@ -57,7 +59,14 @@ void loop() {
 
   // Leitura do sensor de umidade do solo
   int valorSensorUmidade = analogRead(sensorUmidadePin);
-  float sensorUmidadePercentual = ((maxSensorUmidade - valorSensorUmidade) / (float)maxSensorUmidade) * 100;
+  float sensorUmidadePercentual = ((valorMaxSeco - valorSensorUmidade) / (float)(valorMaxSeco - valorMinUmido)) * 100;
+
+  // Garantia de que a umidade fique entre 0% e 100%
+  if (sensorUmidadePercentual > 100) {
+    sensorUmidadePercentual = 100;
+  } else if (sensorUmidadePercentual < 0) {
+    sensorUmidadePercentual = 0;
+  }
 
   // Exibe os resultados no monitor serial
   Serial.print("Nível de água: ");
@@ -68,22 +77,22 @@ void loop() {
   Serial.print(sensorUmidadePercentual);
   Serial.println("%");
 
-  // Enviar dados para TagoIO
-  sendTagoIOData("nivel_agua", nivelAguaPercentual);
-  sendTagoIOData("umidade_solo", sensorUmidadePercentual);
+  // Enviar dados para Thinger.io
+  sendThingerData("nivel_agua", nivelAguaPercentual);
+  sendThingerData("umidade_solo", sensorUmidadePercentual);
 
   // Verifica condições para o relé
   if (nivelAguaPercentual > 30 && sensorUmidadePercentual < 30) {
     digitalWrite(relayPin, HIGH);  // Liga o relé
     Serial.println("Relé ligado (Condições atendidas)");
-    sendTagoIOData("status_rele", 1);  // Envia status do relé
+    sendThingerData("status_rele", 1);  // Envia o estado do relé (ligado) para o Thinger.io
   } else {
     digitalWrite(relayPin, LOW);   // Desliga o relé
     Serial.println("Relé desligado (Condições não atendidas)");
-    sendTagoIOData("status_rele", 0);  // Envia status do relé
+    sendThingerData("status_rele", 0);  // Envia o estado do relé (desligado) para o Thinger.io
   }
 
-  delay(5000);  // Espera 1 minuto
+  delay(60000);  // Espera 1 minuto antes de enviar os dados novamente
 }
 
 // Função para conectar ao Wi-Fi
@@ -99,30 +108,42 @@ void connectWiFi() {
   Serial.println(WiFi.localIP());  
 }
 
-// Função para conectar ao TagoIO via MQTT
+// Função para conectar ao Thinger.io via MQTT
 void connectMQTT() {
-  Serial.print("Conectando ao TagoIO...");
+  Serial.print("Conectando ao Thinger.io...");
   while (!client.connected()) {
-    if (client.connect("ESP32Client", mqttUser, mqttToken)) {
-      Serial.println("\nConectado ao TagoIO!");
+    if (client.connect(deviceID, mqttUser, mqttToken)) {
+      Serial.println("\nConectado ao Thinger.io!");
     } else {
-      Serial.print("Falha ao conectar ao TagoIO, rc=");
+      Serial.print("Falha ao conectar ao Thinger.io, rc=");
       Serial.print(client.state());
-      Serial.println(" Tentando novamente em 5 segundos...");
-      delay(3600);
+      Serial.println(" Tentando novamente em 60 segundos...");
+      delay(60000);
     }
   }
 }
 
-// Função para enviar dados ao TagoIO
-void sendTagoIOData(const char* variable, float value) {
-  String payload = "{\"variable\":\"";
-  payload += variable;
-  payload += "\",\"value\":";
-  payload += value;
-  payload += "}";
+// Função para enviar dados ao Thinger.io
+void sendThingerData(const char* variable, float value) {
+  String topic;
+
+  // Definindo o tópico de acordo com a variável
+  if (strcmp(variable, "umidade_solo") == 0) {
+    topic = String(deviceID) + "/umidade_solo";  // Tópico para umidade do solo
+  } else if (strcmp(variable, "nivel_agua") == 0) {
+    topic = String(deviceID) + "/nivel_agua";   // Tópico para nível de água
+  } else if (strcmp(variable, "status_rele") == 0) {
+    topic = String(deviceID) + "/estado_rele";  // Tópico para o estado do relé
+  } else {
+    topic = String(deviceID) + "/telemetry";    // Tópico genérico para outros dados
+  }
+
+  // Prepara o payload com o nome da variável e o valor
+  String payload = "{\"" + String(variable) + "\":" + String(value) + "}";
 
   char attributes[100];
   payload.toCharArray(attributes, 100);
-  client.publish("tago/data/post", attributes);
+
+  // Publica os dados no tópico correspondente
+  client.publish(topic.c_str(), attributes);
 }
